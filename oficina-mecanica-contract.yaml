@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Oficina Mecânica — Sistema Integrado de Atendimento e Execução de Serviços (MVP)
-  version: 2.0.0
+  version: 3.0.0
   description: |
     API RESTful do back-end monolítico da oficina mecânica, construída com **DDD** e **Clean Architecture**
     e seguindo o **OWASP API Security Top 10 (2023)**.
@@ -20,8 +20,8 @@ info:
     ```
 
     Convenções aplicadas no contrato:
-    - **Uma operação = um caso de uso.** A extensão `x-use-case` indica a classe da camada Application
-      (ex.: `AbrirOrdemServicoUseCase`). O controller só converte DTO ⇄ comando e delega.
+    - **Uma operação = um caso de uso**, nomeado a partir do `operationId`
+      (ex.: `abrirOrdemServico` → `AbrirOrdemServicoUseCase`). O controller só converte DTO ⇄ comando e delega.
     - **DTOs de entrada e saída separados** (`*Request` / `*Response`). O modelo de domínio e as
       entidades de persistência nunca são expostos diretamente.
     - **Transições de estado são comandos explícitos** (`POST /ordens-servico/{id}/diagnostico`, `/finalizacao` …),
@@ -34,41 +34,50 @@ info:
     - Valores monetários trafegam como **string decimal** (sem ponto flutuante).
 
     ---
-    ## 2. Segurança (OWASP API Top 10)
+    ## 2. Convenções HTTP (valem para todas as operações)
+
+    Para manter o contrato enxuto, o que é comum a todas as operações está descrito aqui, e não repetido em cada uma:
+
+    | Item | Regra |
+    |---|---|
+    | `X-Request-Id` | Opcional no request (UUID). Sempre devolvido na resposta (ecoado ou gerado) e igual a `Problem.traceId`. |
+    | `Cache-Control: no-store` | Em toda resposta autenticada e nas respostas de `/auth` e `/portal`. |
+    | `ETag` / `If-Match` | `GET`, `POST` e `PUT` de recursos mutáveis devolvem `ETag`. Operações com `If-Match` respondem `428` se ele faltar e `412` se estiver desatualizado. |
+    | `Location` | Em toda resposta `201`. |
+    | Rate limit | `429` com `Retry-After` e `RateLimit-Limit/Remaining/Reset`. |
+    | Erros genéricos | `400`, `401`, `403`, `415`, `429` e `500` podem ocorrer em qualquer operação e ficam em `default`. Cada operação lista só os erros específicos dela (`404`, `409`, `422`). |
+
+    ---
+    ## 3. Segurança (OWASP API Top 10)
 
     | Risco | Mitigação neste contrato |
     |---|---|
     | API1 — BOLA | IDs UUID v4 (não sequenciais); o Portal do Cliente não recebe ID de OS: a OS vem do **token** do cliente. |
     | API2 — Broken Authentication | JWT de acesso curto (**15 min**) + refresh token rotativo com detecção de reuso; logout revoga; login com limite de tentativas e mensagem genérica; cliente autentica por **OTP**, não por CPF. |
     | API3 — Broken Object Property Level Auth. | `additionalProperties: false` em todos os requests (evita *mass assignment*); campos `readOnly`; respostas do cliente com dados mascarados. |
-    | API4 — Unrestricted Resource Consumption | `maxLength`/`maxItems`/`maximum` em todos os campos; paginação limitada a 100; rate limiting com cabeçalhos `RateLimit-*` e `Retry-After`. |
+    | API4 — Unrestricted Resource Consumption | `maxLength`/`maxItems`/`maximum` em todos os campos; paginação limitada a 100; rate limiting. |
     | API5 — Broken Function Level Auth. | RBAC por operação (`x-roles`): `ADMIN`, `ATENDENTE`, `MECANICO`; `403` quando o perfil não permite. |
-    | API6 — Fluxos de negócio sensíveis | `Idempotency-Key` obrigatório em comandos (abrir OS, aprovar orçamento, mover estoque). |
+    | API6 — Fluxos de negócio sensíveis | `Idempotency-Key` obrigatório em comandos (abrir OS, decidir orçamento, mover estoque). |
     | API7 — SSRF | Nenhum endpoint aceita URL fornecida pelo usuário. |
-    | API8 — Security Misconfiguration | HTTPS obrigatório fora do ambiente local; cabeçalhos `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` em respostas autenticadas; CORS restrito; erros sem *stack trace*. |
+    | API8 — Security Misconfiguration | HTTPS obrigatório fora do ambiente local; `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`; CORS restrito; erros sem *stack trace*. |
     | API9 — Improper Inventory Management | Versionamento na URL (`/api/v1`); operações obsoletas marcadas com `deprecated`. |
     | API10 — Unsafe Consumption of APIs | Não há consumo de APIs de terceiros no MVP (envio de e-mail/SMS via adaptador isolado). |
 
     **Dados pessoais (LGPD):** CPF/CNPJ nunca aparece em URL (path ou query), pois URLs são registradas em logs e proxies.
     Buscas por documento usam `POST /clientes/pesquisa`. Logs mascaram CPF/CNPJ e tokens.
-
-    **Concorrência otimista:** `GET` de recursos mutáveis devolve `ETag`; `PUT`/`DELETE` exigem `If-Match`
-    (`428` se ausente, `412` se desatualizado).
-
-    **Rastreabilidade:** todo request pode enviar `X-Request-Id` (UUID); a resposta sempre devolve o mesmo valor
-    (ou um gerado), também presente em `Problem.traceId`. Ações administrativas geram trilha de auditoria.
+    Ações administrativas geram trilha de auditoria.
 
     ---
-    ## 3. Ciclo de vida da OS
+    ## 4. Ciclo de vida da OS
 
     | Comando | Perfil | Transição |
     |---|---|---|
     | `POST /ordens-servico` | ATENDENTE | → `RECEBIDA` |
     | `POST /ordens-servico/{id}/diagnostico` | MECANICO | `RECEBIDA` → `EM_DIAGNOSTICO` |
     | `POST /ordens-servico/{id}/orcamento/envio` | ATENDENTE | `EM_DIAGNOSTICO` → `AGUARDANDO_APROVACAO` |
-    | `POST /portal/ordem-servico/orcamento/aprovacao` | Cliente | `AGUARDANDO_APROVACAO` → `EM_EXECUCAO` |
-    | `POST /portal/ordem-servico/orcamento/recusa` | Cliente | orçamento inicial → `FINALIZADA`; adicional → `EM_EXECUCAO` |
-    | Inclusão de item em `EM_EXECUCAO` | MECANICO | `EM_EXECUCAO` → `AGUARDANDO_APROVACAO` (orçamento adicional) |
+    | `POST /portal/ordem-servico/orcamento/decisao` (`APROVAR`) | Cliente | `AGUARDANDO_APROVACAO` → `EM_EXECUCAO` |
+    | `POST /portal/ordem-servico/orcamento/decisao` (`RECUSAR`) | Cliente | orçamento inicial → `FINALIZADA`; adicional → `EM_EXECUCAO` |
+    | `POST /ordens-servico/{id}/itens` em `EM_EXECUCAO` | MECANICO | `EM_EXECUCAO` → `AGUARDANDO_APROVACAO` (orçamento adicional) |
     | `POST /ordens-servico/{id}/finalizacao` | MECANICO | `EM_EXECUCAO` → `FINALIZADA` |
     | `POST /ordens-servico/{id}/entrega` | ATENDENTE | `FINALIZADA` → `ENTREGUE` |
 
@@ -99,7 +108,7 @@ tags:
   - name: Atendimento — Ordens de Serviço
     description: Agregado OrdemServico — abertura, itens, orçamento e ciclo de vida.
   - name: Portal do Cliente
-    description: Autenticação do cliente por OTP, acompanhamento da OS e aprovação de orçamento.
+    description: Autenticação do cliente por OTP, acompanhamento da OS e decisão sobre o orçamento.
   - name: Métricas
     description: Indicadores operacionais (tempo médio de execução).
 
@@ -113,480 +122,212 @@ paths:
       tags: [Identidade & Acesso]
       summary: Autentica usuário interno
       description: |
-        Retorna um access token (JWT, 15 min) e um refresh token opaco (7 dias, uso único).
-        Credenciais inválidas sempre retornam a **mesma** mensagem genérica, sem indicar se o e-mail existe.
-        Após 5 falhas consecutivas a conta é bloqueada temporariamente (15 min) e o IP sofre rate limit.
+        Retorna access token (JWT, 15 min) e refresh token opaco (7 dias, uso único).
+        Credenciais inválidas → sempre a mesma mensagem genérica. 5 falhas seguidas bloqueiam a conta por 15 min.
       operationId: autenticarUsuario
-      x-use-case: AutenticarUsuarioUseCase
       security: []
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/LoginRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } }
       responses:
-        '200':
-          description: Autenticado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TokenResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { $ref: '#/components/responses/Token' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /auth/refresh:
     post:
       tags: [Identidade & Acesso]
       summary: Renova o access token (rotação de refresh token)
-      description: |
-        O refresh token informado é invalidado e um novo par é emitido. A reutilização de um refresh token
-        já usado revoga **toda a família** de tokens da sessão (detecção de roubo).
+      description: O refresh token usado é invalidado. Reuso de um token já usado revoga toda a sessão (detecção de roubo).
       operationId: renovarToken
-      x-use-case: RenovarTokenUseCase
       security: []
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/RefreshTokenRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/RefreshTokenRequest' } } }
       responses:
-        '200':
-          description: Novo par de tokens
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TokenResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { $ref: '#/components/responses/Token' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /auth/logout:
     post:
       tags: [Identidade & Acesso]
       summary: Encerra a sessão
-      description: Revoga o refresh token e adiciona o `jti` do access token à denylist até sua expiração.
+      description: Revoga o refresh token e coloca o `jti` do access token na denylist até expirar.
       operationId: encerrarSessao
-      x-use-case: EncerrarSessaoUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/RefreshTokenRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/RefreshTokenRequest' } } }
       responses:
-        '204':
-          description: Sessão encerrada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /auth/me:
-    get:
-      tags: [Identidade & Acesso]
-      summary: Dados do usuário autenticado
-      operationId: obterUsuarioAutenticado
-      x-use-case: ObterUsuarioAutenticadoUseCase
-      x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
-      responses:
-        '200':
-          description: Usuário autenticado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/UsuarioResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '204': { description: Sessão encerrada }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ CLIENTES ═════════════════════════
   /clientes:
     get:
       tags: [Cadastro — Clientes]
       summary: Lista clientes
-      description: Para localizar por CPF/CNPJ use `POST /clientes/pesquisa` (o documento não trafega em URL).
+      description: Para buscar por CPF/CNPJ use `POST /clientes/pesquisa`.
       operationId: listarClientes
-      x-use-case: ListarClientesUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
-        - name: sort
-          in: query
-          schema: { type: string, enum: [nome, -nome, criadoEm, -criadoEm], default: nome }
-        - name: nome
-          in: query
-          description: Filtro parcial por nome
-          schema: { type: string, minLength: 2, maxLength: 150 }
+        - { name: nome, in: query, description: Filtro parcial por nome, schema: { type: string, minLength: 2, maxLength: 150 } }
+        - { name: sort, in: query, schema: { type: string, enum: [nome, -nome, criadoEm, -criadoEm], default: nome } }
       responses:
-        '200':
-          description: Página de clientes
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaClientes' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Página de clientes, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaClientes' } } } }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Cadastro — Clientes]
       summary: Cadastra cliente
-      description: CPF/CNPJ validado pelos dígitos verificadores (Value Object `Documento`) e único no sistema.
+      description: CPF/CNPJ validado pelos dígitos verificadores e único no sistema.
       operationId: cadastrarCliente
-      x-use-case: CadastrarClienteUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ClienteRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ClienteRequest' } } }
       responses:
-        '201':
-          description: Cliente criado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Location: { $ref: '#/components/headers/Location' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClienteResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: Cliente criado, content: { application/json: { schema: { $ref: '#/components/schemas/ClienteResponse' } } } }
         '409': { $ref: '#/components/responses/Conflict' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /clientes/pesquisa:
     post:
       tags: [Cadastro — Clientes]
       summary: Localiza cliente por CPF/CNPJ
-      description: |
-        Operação de **consulta** (não altera estado). Usa POST para que o documento trafegue no corpo,
-        e não em URL/logs. Retorna `404` se não houver cliente.
+      description: Consulta (não altera estado). Usa POST para o documento trafegar no corpo, e não em URL/logs.
       operationId: pesquisarClientePorDocumento
-      x-use-case: BuscarClientePorDocumentoUseCase
       x-roles: [ADMIN, ATENDENTE]
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PesquisaClienteRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/PesquisaClienteRequest' } } }
       responses:
-        '200':
-          description: Cliente encontrado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClienteResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Cliente encontrado, content: { application/json: { schema: { $ref: '#/components/schemas/ClienteResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /clientes/{clienteId}:
     parameters:
       - $ref: '#/components/parameters/ClienteId'
-      - $ref: '#/components/parameters/XRequestId'
     get:
       tags: [Cadastro — Clientes]
       summary: Detalha cliente
       operationId: obterCliente
-      x-use-case: ObterClienteUseCase
       x-roles: [ADMIN, ATENDENTE]
       responses:
-        '200':
-          description: Cliente
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClienteResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Cliente, content: { application/json: { schema: { $ref: '#/components/schemas/ClienteResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     put:
       tags: [Cadastro — Clientes]
       summary: Atualiza cliente
       description: O documento (CPF/CNPJ) é imutável após o cadastro.
       operationId: atualizarCliente
-      x-use-case: AtualizarClienteUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AtualizarClienteRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/AtualizarClienteRequest' } } }
       responses:
-        '200':
-          description: Cliente atualizado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClienteResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Cliente atualizado, content: { application/json: { schema: { $ref: '#/components/schemas/ClienteResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     delete:
       tags: [Cadastro — Clientes]
       summary: Remove cliente (anonimização LGPD)
       description: |
-        Exclusão lógica com anonimização dos dados pessoais; o histórico de OS é preservado sem identificar
-        o titular. Bloqueado (`409`, `CLIENTE_COM_OS_ABERTA`) se houver OS não entregue.
+        Exclusão lógica com anonimização; o histórico de OS é preservado sem identificar o titular.
+        Bloqueado (`409 CLIENTE_COM_OS_ABERTA`) se houver OS não entregue.
       operationId: removerCliente
-      x-use-case: RemoverClienteUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '204':
-          description: Removido
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '204': { description: Removido }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /clientes/{clienteId}/veiculos:
-    get:
-      tags: [Cadastro — Clientes]
-      summary: Lista veículos do cliente
-      operationId: listarVeiculosDoCliente
-      x-use-case: ListarVeiculosDoClienteUseCase
-      x-roles: [ADMIN, ATENDENTE]
-      parameters:
-        - $ref: '#/components/parameters/ClienteId'
-        - $ref: '#/components/parameters/XRequestId'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/Size'
-      responses:
-        '200':
-          description: Veículos do cliente
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaVeiculos' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /clientes/{clienteId}/ordens-servico:
-    get:
-      tags: [Cadastro — Clientes]
-      summary: Histórico de OS do cliente
-      operationId: listarHistoricoOrdensDoCliente
-      x-use-case: ListarOrdensServicoUseCase
-      x-roles: [ADMIN, ATENDENTE]
-      parameters:
-        - $ref: '#/components/parameters/ClienteId'
-        - $ref: '#/components/parameters/XRequestId'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/Size'
-      responses:
-        '200':
-          description: Histórico
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaOrdensServicoResumo' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ VEÍCULOS ═════════════════════════
   /veiculos:
     get:
       tags: [Cadastro — Veículos]
       summary: Lista veículos
+      description: Use `clienteId` para listar os veículos de um cliente.
       operationId: listarVeiculos
-      x-use-case: ListarVeiculosUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
-        - name: placa
-          in: query
-          description: Placa completa (a placa é identificação pública do veículo, não dado pessoal sensível)
-          schema: { $ref: '#/components/schemas/Placa' }
-        - name: clienteId
-          in: query
-          schema: { type: string, format: uuid }
+        - { name: placa, in: query, schema: { $ref: '#/components/schemas/Placa' } }
+        - { name: clienteId, in: query, schema: { type: string, format: uuid } }
       responses:
-        '200':
-          description: Página de veículos
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaVeiculos' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Página de veículos, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaVeiculos' } } } }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Cadastro — Veículos]
       summary: Cadastra veículo
-      description: Placa validada (padrão antigo `ABC1234` ou Mercosul `ABC1D23`), normalizada em maiúsculas e única.
+      description: Placa no padrão antigo (`ABC1234`) ou Mercosul (`ABC1D23`), em maiúsculas e única.
       operationId: cadastrarVeiculo
-      x-use-case: CadastrarVeiculoUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/VeiculoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/VeiculoRequest' } } }
       responses:
-        '201':
-          description: Veículo criado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Location: { $ref: '#/components/headers/Location' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/VeiculoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: Veículo criado, content: { application/json: { schema: { $ref: '#/components/schemas/VeiculoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /veiculos/{veiculoId}:
     parameters:
       - $ref: '#/components/parameters/VeiculoId'
-      - $ref: '#/components/parameters/XRequestId'
     get:
       tags: [Cadastro — Veículos]
       summary: Detalha veículo
       operationId: obterVeiculo
-      x-use-case: ObterVeiculoUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       responses:
-        '200':
-          description: Veículo
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/VeiculoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Veículo, content: { application/json: { schema: { $ref: '#/components/schemas/VeiculoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     put:
       tags: [Cadastro — Veículos]
       summary: Atualiza veículo
       operationId: atualizarVeiculo
-      x-use-case: AtualizarVeiculoUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/VeiculoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/VeiculoRequest' } } }
       responses:
-        '200':
-          description: Veículo atualizado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/VeiculoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Veículo atualizado, content: { application/json: { schema: { $ref: '#/components/schemas/VeiculoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     delete:
       tags: [Cadastro — Veículos]
       summary: Remove veículo
-      description: Exclusão lógica. Bloqueado (`409`, `VEICULO_COM_OS_ABERTA`) se houver OS não entregue.
+      description: Exclusão lógica. Bloqueado (`409 VEICULO_COM_OS_ABERTA`) se houver OS não entregue.
       operationId: removerVeiculo
-      x-use-case: RemoverVeiculoUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '204':
-          description: Removido
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '204': { description: Removido }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ SERVIÇOS ═════════════════════════
   /servicos:
@@ -594,134 +335,69 @@ paths:
       tags: [Catálogo — Serviços]
       summary: Lista serviços do catálogo
       operationId: listarServicos
-      x-use-case: ListarServicosUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
-        - name: nome
-          in: query
-          schema: { type: string, minLength: 2, maxLength: 120 }
-        - name: ativo
-          in: query
-          schema: { type: boolean, default: true }
+        - { name: nome, in: query, schema: { type: string, minLength: 2, maxLength: 120 } }
+        - { name: ativo, in: query, schema: { type: boolean, default: true } }
       responses:
-        '200':
-          description: Página de serviços
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaServicos' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Página de serviços, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaServicos' } } } }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Catálogo — Serviços]
       summary: Cadastra serviço
       operationId: cadastrarServico
-      x-use-case: CadastrarServicoUseCase
       x-roles: [ADMIN]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ServicoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ServicoRequest' } } }
       responses:
-        '201':
-          description: Serviço criado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Location: { $ref: '#/components/headers/Location' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ServicoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: Serviço criado, content: { application/json: { schema: { $ref: '#/components/schemas/ServicoResponse' } } } }
         '409': { $ref: '#/components/responses/Conflict' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /servicos/{servicoId}:
     parameters:
       - $ref: '#/components/parameters/ServicoId'
-      - $ref: '#/components/parameters/XRequestId'
     get:
       tags: [Catálogo — Serviços]
       summary: Detalha serviço
       operationId: obterServico
-      x-use-case: ObterServicoUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       responses:
-        '200':
-          description: Serviço
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ServicoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Serviço, content: { application/json: { schema: { $ref: '#/components/schemas/ServicoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     put:
       tags: [Catálogo — Serviços]
       summary: Atualiza serviço
-      description: Alterar o preço não afeta OS já orçadas (o preço é congelado no item da OS).
+      description: Mudar o preço não afeta OS já orçadas (o preço fica congelado no item da OS).
       operationId: atualizarServico
-      x-use-case: AtualizarServicoUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ServicoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ServicoRequest' } } }
       responses:
-        '200':
-          description: Serviço atualizado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ServicoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Serviço atualizado, content: { application/json: { schema: { $ref: '#/components/schemas/ServicoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     delete:
       tags: [Catálogo — Serviços]
       summary: Inativa serviço
-      description: Exclusão lógica — permanece no histórico das OS e deixa de ser ofertado.
+      description: Exclusão lógica — continua no histórico das OS e deixa de ser ofertado.
       operationId: inativarServico
-      x-use-case: InativarServicoUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '204':
-          description: Inativado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '204': { description: Inativado }
         '404': { $ref: '#/components/responses/NotFound' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ ESTOQUE ═════════════════════════
   /pecas:
@@ -729,204 +405,111 @@ paths:
       tags: [Estoque — Peças e Insumos]
       summary: Lista peças e insumos
       operationId: listarPecas
-      x-use-case: ListarPecasUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
-        - name: nome
-          in: query
-          schema: { type: string, minLength: 2, maxLength: 120 }
-        - name: tipo
-          in: query
-          schema: { $ref: '#/components/schemas/TipoItemEstoque' }
-        - name: abaixoDoMinimo
-          in: query
-          description: Somente itens com disponível abaixo do estoque mínimo
-          schema: { type: boolean }
+        - { name: nome, in: query, schema: { type: string, minLength: 2, maxLength: 120 } }
+        - { name: tipo, in: query, schema: { $ref: '#/components/schemas/TipoItemEstoque' } }
+        - { name: abaixoDoMinimo, in: query, description: Só itens com disponível abaixo do mínimo, schema: { type: boolean } }
       responses:
-        '200':
-          description: Página de peças/insumos
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaPecas' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Página de peças/insumos, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaPecas' } } } }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Estoque — Peças e Insumos]
       summary: Cadastra peça ou insumo
-      description: O saldo inicial é zero; use a movimentação `ENTRADA` para abastecer (mantém rastreabilidade).
+      description: Saldo inicial zero; abasteça com uma movimentação `ENTRADA` (mantém rastreabilidade).
       operationId: cadastrarPeca
-      x-use-case: CadastrarPecaUseCase
       x-roles: [ADMIN]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PecaRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/PecaRequest' } } }
       responses:
-        '201':
-          description: Peça criada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Location: { $ref: '#/components/headers/Location' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PecaResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: Peça criada, content: { application/json: { schema: { $ref: '#/components/schemas/PecaResponse' } } } }
         '409': { $ref: '#/components/responses/Conflict' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /pecas/{pecaId}:
     parameters:
       - $ref: '#/components/parameters/PecaId'
-      - $ref: '#/components/parameters/XRequestId'
     get:
       tags: [Estoque — Peças e Insumos]
       summary: Detalha peça/insumo
-      description: O `precoCusto` só é retornado para o perfil ADMIN.
+      description: '`precoCusto` só é retornado para ADMIN.'
       operationId: obterPeca
-      x-use-case: ObterPecaUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       responses:
-        '200':
-          description: Peça
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PecaResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Peça, content: { application/json: { schema: { $ref: '#/components/schemas/PecaResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     put:
       tags: [Estoque — Peças e Insumos]
       summary: Atualiza dados cadastrais da peça
-      description: O saldo **não** é alterado aqui — use `/pecas/{pecaId}/movimentacoes`.
+      description: Não altera o saldo — para isso use `/pecas/{pecaId}/movimentacoes`.
       operationId: atualizarPeca
-      x-use-case: AtualizarPecaUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PecaRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/PecaRequest' } } }
       responses:
-        '200':
-          description: Peça atualizada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PecaResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Peça atualizada, content: { application/json: { schema: { $ref: '#/components/schemas/PecaResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     delete:
       tags: [Estoque — Peças e Insumos]
       summary: Inativa peça/insumo
-      description: Exclusão lógica. Bloqueado (`409`, `PECA_COM_RESERVA`) se houver reserva em OS aberta.
+      description: Exclusão lógica. Bloqueado (`409 PECA_COM_RESERVA`) se houver reserva em OS aberta.
       operationId: inativarPeca
-      x-use-case: InativarPecaUseCase
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '204':
-          description: Inativada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '204': { description: Inativada }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /pecas/{pecaId}/movimentacoes:
     parameters:
       - $ref: '#/components/parameters/PecaId'
-      - $ref: '#/components/parameters/XRequestId'
     get:
       tags: [Estoque — Peças e Insumos]
       summary: Histórico de movimentações (livro-razão do estoque)
-      description: Movimentações são imutáveis (append-only); correções são feitas com novas movimentações.
-      operationId: listarMovimentacoes
-      x-use-case: ListarMovimentacoesEstoqueUseCase
+      description: Movimentações são imutáveis (append-only); correções são novas movimentações.
+      operationId: listarMovimentacoesEstoque
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
       responses:
-        '200':
-          description: Movimentações
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaMovimentacoes' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { description: Movimentações, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaMovimentacoes' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Estoque — Peças e Insumos]
       summary: Registra movimentação manual de estoque
       description: |
-        - `ENTRADA`: soma ao saldo (ex.: compra).
-        - `SAIDA`: subtrai do disponível; `422 ESTOQUE_INSUFICIENTE` se não houver saldo.
-        - `AJUSTE_INVENTARIO`: define o saldo físico contado; `motivo` obrigatório.
-
-        `RESERVA`, `LIBERACAO_RESERVA` e `BAIXA_OS` são geradas **somente** pelo agregado OrdemServico
-        (eventos de domínio) e não podem ser enviadas por aqui.
-      operationId: registrarMovimentacao
-      x-use-case: RegistrarMovimentacaoEstoqueUseCase
+        `ENTRADA` soma ao saldo; `SAIDA` subtrai do disponível (`422 ESTOQUE_INSUFICIENTE`);
+        `AJUSTE_INVENTARIO` define o saldo contado (`motivo` obrigatório).
+        `RESERVA`, `LIBERACAO_RESERVA` e `BAIXA_OS` são geradas só pelo agregado OrdemServico.
+      operationId: registrarMovimentacaoEstoque
       x-roles: [ADMIN]
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/MovimentacaoEstoqueRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/MovimentacaoEstoqueRequest' } } }
       responses:
-        '201':
-          description: Movimentação registrada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MovimentacaoEstoqueResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: Movimentação registrada, content: { application/json: { schema: { $ref: '#/components/schemas/MovimentacaoEstoqueResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ ORDENS DE SERVIÇO ═════════════════════════
   /ordens-servico:
@@ -934,65 +517,39 @@ paths:
       tags: [Atendimento — Ordens de Serviço]
       summary: Lista ordens de serviço
       description: |
-        Ordenação padrão por **prioridade de atendimento**: `EM_EXECUCAO` > `AGUARDANDO_APROVACAO` >
-        `EM_DIAGNOSTICO` > `RECEBIDA`; dentro do mesmo status, da mais antiga para a mais nova.
-        `FINALIZADA` e `ENTREGUE` só aparecem se filtradas explicitamente.
+        Ordenadas por prioridade: `EM_EXECUCAO` > `AGUARDANDO_APROVACAO` > `EM_DIAGNOSTICO` > `RECEBIDA`,
+        e da mais antiga para a mais nova dentro do mesmo status. `FINALIZADA` e `ENTREGUE` só aparecem
+        se filtradas. Use `clienteId` para o histórico de OS de um cliente.
       operationId: listarOrdensServico
-      x-use-case: ListarOrdensServicoUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
         - name: status
           in: query
           style: form
           explode: true
-          schema:
-            type: array
-            maxItems: 6
-            uniqueItems: true
-            items: { $ref: '#/components/schemas/StatusOS' }
-        - name: clienteId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: placa
-          in: query
-          schema: { $ref: '#/components/schemas/Placa' }
-        - name: abertaDe
-          in: query
-          schema: { type: string, format: date }
-        - name: abertaAte
-          in: query
-          schema: { type: string, format: date }
+          schema: { type: array, maxItems: 6, uniqueItems: true, items: { $ref: '#/components/schemas/StatusOS' } }
+        - { name: clienteId, in: query, schema: { type: string, format: uuid } }
+        - { name: placa, in: query, schema: { $ref: '#/components/schemas/Placa' } }
+        - { name: abertaDe, in: query, schema: { type: string, format: date } }
+        - { name: abertaAte, in: query, schema: { type: string, format: date } }
       responses:
-        '200':
-          description: Página de OS
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PaginaOrdensServicoResumo' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Página de OS, content: { application/json: { schema: { $ref: '#/components/schemas/PaginaOrdensServicoResumo' } } } }
+        default: { $ref: '#/components/responses/Erro' }
     post:
       tags: [Atendimento — Ordens de Serviço]
       summary: Abre ordem de serviço
       description: |
-        1. Identifica o cliente pelo **CPF/CNPJ** (cadastra se `novoCliente` for informado e o documento não existir).
-        2. Identifica o veículo por `veiculoId` **ou** cadastra `novoVeiculo` vinculado ao cliente.
-        3. Inclui serviços e, opcionalmente, peças/insumos (reservados no estoque de forma atômica).
-        4. Gera o **orçamento automaticamente** (preços congelados no momento da inclusão).
+        1. Identifica o cliente pelo CPF/CNPJ (cadastra com `novoCliente` se não existir).
+        2. Usa `veiculoId` **ou** cadastra `novoVeiculo` vinculado ao cliente.
+        3. Inclui os itens (peças reservadas no estoque) e gera o orçamento com preços congelados.
 
-        Status inicial `RECEBIDA`. Um e-mail é enviado ao cliente com o **código de acompanhamento**.
-        Toda a operação ocorre em uma única transação. `Idempotency-Key` evita OS duplicadas em reenvios.
+        Status inicial `RECEBIDA`; o cliente recebe por e-mail o código de acompanhamento.
+        Tudo em uma única transação.
       operationId: abrirOrdemServico
-      x-use-case: AbrirOrdemServicoUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -1001,251 +558,97 @@ paths:
             schema: { $ref: '#/components/schemas/AbrirOrdemServicoRequest' }
             example:
               documentoCliente: '52998224725'
-              novoCliente:
-                nome: João da Silva
-                email: joao@email.com
-                telefone: '+5511999998888'
-              novoVeiculo:
-                placa: ABC1D23
-                marca: Volkswagen
-                modelo: Gol 1.6
-                ano: 2019
-              servicos:
-                - { servicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6, quantidade: 1 }
-              pecas:
-                - { pecaId: 7c9e6679-7425-40de-944b-e07fc1f90ae7, quantidade: 4 }
+              novoCliente: { nome: João da Silva, email: joao@email.com, telefone: '+5511999998888' }
+              novoVeiculo: { placa: ABC1D23, marca: Volkswagen, modelo: Gol 1.6, ano: 2019 }
+              itens:
+                - { tipo: SERVICO, referenciaId: 3fa85f64-5717-4562-b3fc-2c963f66afa6, quantidade: 1 }
+                - { tipo: PECA, referenciaId: 7c9e6679-7425-40de-944b-e07fc1f90ae7, quantidade: 4 }
               relatoCliente: Barulho na suspensão dianteira
       responses:
-        '201':
-          description: OS aberta
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Location: { $ref: '#/components/headers/Location' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { description: OS aberta, content: { application/json: { schema: { $ref: '#/components/schemas/OrdemServicoResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /ordens-servico/{osId}:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     get:
       tags: [Atendimento — Ordens de Serviço]
       summary: Detalha ordem de serviço
+      description: Inclui itens, orçamento vigente e linha do tempo de status.
       operationId: obterOrdemServico
-      x-use-case: ObterOrdemServicoUseCase
       x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
       responses:
-        '200':
-          description: OS
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
-  /ordens-servico/{osId}/servicos:
+  /ordens-servico/{osId}/itens:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     post:
       tags: [Atendimento — Ordens de Serviço]
-      summary: Inclui serviço na OS
+      summary: Inclui serviço ou peça na OS
       description: |
-        Permitido em `RECEBIDA` e `EM_DIAGNOSTICO` (orçamento recalculado).
-        Em `EM_EXECUCAO` gera **orçamento adicional** e a OS volta para `AGUARDANDO_APROVACAO`.
-      operationId: incluirServicoNaOrdem
-      x-use-case: IncluirServicoNaOrdemUseCase
+        Em `RECEBIDA` e `EM_DIAGNOSTICO` o orçamento é recalculado. Em `EM_EXECUCAO` gera **orçamento adicional**
+        e a OS volta para `AGUARDANDO_APROVACAO`. Peças são reservadas no estoque (`422 ESTOQUE_INSUFICIENTE`).
+      operationId: incluirItemNaOrdem
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ItemServicoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ItemOrdemRequest' } } }
       responses:
-        '201':
-          description: Serviço incluído
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '201': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /ordens-servico/{osId}/servicos/{itemId}:
-    delete:
-      tags: [Atendimento — Ordens de Serviço]
-      summary: Remove serviço da OS
-      description: Permitido somente em `RECEBIDA` ou `EM_DIAGNOSTICO`.
-      operationId: removerServicoDaOrdem
-      x-use-case: RemoverItemDaOrdemUseCase
-      x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/ItemId'
-        - $ref: '#/components/parameters/XRequestId'
-        - $ref: '#/components/parameters/IfMatch'
-      responses:
-        '200':
-          description: OS atualizada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /ordens-servico/{osId}/pecas:
-    post:
-      tags: [Atendimento — Ordens de Serviço]
-      summary: Inclui peça/insumo na OS
-      description: |
-        Reserva a quantidade no estoque (`422 ESTOQUE_INSUFICIENTE` se não houver disponível).
-        Mesmas regras de status da inclusão de serviço.
-      operationId: incluirPecaNaOrdem
-      x-use-case: IncluirPecaNaOrdemUseCase
-      x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - $ref: '#/components/parameters/IfMatch'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ItemPecaRequest' }
-      responses:
-        '201':
-          description: Peça incluída
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
-  /ordens-servico/{osId}/pecas/{itemId}:
+  /ordens-servico/{osId}/itens/{itemId}:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
+      - $ref: '#/components/parameters/ItemId'
     delete:
       tags: [Atendimento — Ordens de Serviço]
-      summary: Remove peça/insumo da OS
-      description: Libera a reserva no estoque. Permitido somente em `RECEBIDA` ou `EM_DIAGNOSTICO`.
-      operationId: removerPecaDaOrdem
-      x-use-case: RemoverItemDaOrdemUseCase
+      summary: Remove item da OS
+      description: Só em `RECEBIDA` ou `EM_DIAGNOSTICO`. Se for peça, libera a reserva no estoque.
+      operationId: removerItemDaOrdem
       x-roles: [ADMIN, ATENDENTE, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/ItemId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '200':
-          description: OS atualizada
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            ETag: { $ref: '#/components/headers/ETag' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /ordens-servico/{osId}/diagnostico:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     post:
       tags: [Atendimento — Ordens de Serviço]
       summary: Inicia diagnóstico
       description: '`RECEBIDA` → `EM_DIAGNOSTICO`.'
       operationId: iniciarDiagnostico
-      x-use-case: IniciarDiagnosticoUseCase
       x-roles: [ADMIN, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ObservacaoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ObservacaoRequest' } } }
       responses:
-        '200': { $ref: '#/components/responses/OrdemServicoAtualizada' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /ordens-servico/{osId}/orcamento:
-    get:
-      tags: [Atendimento — Ordens de Serviço]
-      summary: Consulta orçamento vigente
-      operationId: obterOrcamento
-      x-use-case: ObterOrcamentoUseCase
-      x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
-      responses:
-        '200':
-          description: Orçamento
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OrcamentoResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /ordens-servico/{osId}/orcamento/envio:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     post:
       tags: [Atendimento — Ordens de Serviço]
       summary: Envia orçamento ao cliente
@@ -1253,98 +656,52 @@ paths:
         `EM_DIAGNOSTICO` → `AGUARDANDO_APROVACAO`. Congela os valores e notifica o cliente.
         Exige ao menos um serviço (`422 ORCAMENTO_SEM_ITENS`).
       operationId: enviarOrcamento
-      x-use-case: EnviarOrcamentoUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '200': { $ref: '#/components/responses/OrdemServicoAtualizada' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /ordens-servico/{osId}/finalizacao:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     post:
       tags: [Atendimento — Ordens de Serviço]
       summary: Finaliza execução
       description: '`EM_EXECUCAO` → `FINALIZADA`. Registra o fim da execução (base das métricas).'
       operationId: finalizarOrdemServico
-      x-use-case: FinalizarOrdemServicoUseCase
       x-roles: [ADMIN, MECANICO]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ObservacaoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/ObservacaoRequest' } } }
       responses:
-        '200': { $ref: '#/components/responses/OrdemServicoAtualizada' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   /ordens-servico/{osId}/entrega:
+    parameters:
+      - $ref: '#/components/parameters/OsId'
     post:
       tags: [Atendimento — Ordens de Serviço]
       summary: Registra entrega do veículo
       description: '`FINALIZADA` → `ENTREGUE`.'
       operationId: entregarVeiculo
-      x-use-case: EntregarVeiculoUseCase
       x-roles: [ADMIN, ATENDENTE]
       parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IfMatch'
       responses:
-        '200': { $ref: '#/components/responses/OrdemServicoAtualizada' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/OrdemServico' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '412': { $ref: '#/components/responses/PreconditionFailed' }
-        '428': { $ref: '#/components/responses/PreconditionRequired' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /ordens-servico/{osId}/historico:
-    get:
-      tags: [Atendimento — Ordens de Serviço]
-      summary: Linha do tempo de status (auditoria)
-      operationId: obterHistoricoOrdem
-      x-use-case: ObterHistoricoOrdemUseCase
-      x-roles: [ADMIN, ATENDENTE, MECANICO]
-      parameters:
-        - $ref: '#/components/parameters/OsId'
-        - $ref: '#/components/parameters/XRequestId'
-      responses:
-        '200':
-          description: Histórico
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema:
-                type: array
-                maxItems: 100
-                items: { $ref: '#/components/schemas/HistoricoStatusResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ PORTAL DO CLIENTE ═════════════════════════
   /portal/autenticacao:
@@ -1352,167 +709,74 @@ paths:
       tags: [Portal do Cliente]
       summary: Solicita código de acesso (OTP)
       description: |
-        O cliente informa o **código de acompanhamento** (recebido na abertura da OS) e o CPF/CNPJ.
-        Se o par for válido, um OTP de 6 dígitos (válido por 5 min) é enviado ao e-mail/telefone cadastrado.
-
-        **Anti-enumeração:** a resposta é **sempre `202`** com o mesmo corpo, exista ou não a OS.
-        Limite: 3 solicitações por OS a cada 15 min e rate limit por IP.
-      operationId: solicitarCodigoAcesso
-      x-use-case: SolicitarAcessoClienteUseCase
+        O cliente informa o código de acompanhamento e o CPF/CNPJ. Se o par for válido, um OTP de 6 dígitos
+        (válido por 5 min) vai para o contato cadastrado.
+        **Anti-enumeração:** responde sempre `202` com o mesmo corpo. Limite de 3 pedidos por OS a cada 15 min.
+      operationId: solicitarAcessoCliente
       security: []
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SolicitarAcessoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/SolicitarAcessoRequest' } } }
       responses:
-        '202':
-          description: Solicitação aceita (resposta idêntica em qualquer caso)
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/DesafioAcessoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '202': { description: Solicitação aceita (resposta idêntica em qualquer caso), content: { application/json: { schema: { $ref: '#/components/schemas/DesafioAcessoResponse' } } } }
+        default: { $ref: '#/components/responses/Erro' }
 
   /portal/autenticacao/{desafioId}/verificacao:
     post:
       tags: [Portal do Cliente]
       summary: Valida o OTP e emite token do cliente
       description: |
-        Emite um JWT de **escopo restrito** (`scope=portal:os`, `sub` = id da OS, 30 min).
-        O token só dá acesso à OS a que está vinculado. Após 5 tentativas erradas o desafio é invalidado.
-      operationId: verificarCodigoAcesso
-      x-use-case: VerificarAcessoClienteUseCase
+        Emite JWT de escopo restrito (`scope=portal:os`, `sub` = id da OS, 30 min), válido só para aquela OS.
+        Após 5 tentativas erradas o desafio é invalidado.
+      operationId: verificarAcessoCliente
       security: []
       parameters:
-        - name: desafioId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-        - $ref: '#/components/parameters/XRequestId'
+        - { name: desafioId, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/VerificarAcessoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/VerificarAcessoRequest' } } }
       responses:
-        '200':
-          description: Token do cliente
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TokenClienteResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Token do cliente, content: { application/json: { schema: { $ref: '#/components/schemas/TokenClienteResponse' } } } }
+        default: { $ref: '#/components/responses/Erro' }
 
   /portal/ordem-servico:
     get:
       tags: [Portal do Cliente]
       summary: Cliente acompanha a OS
       description: |
-        A OS é resolvida **pelo token** (sem ID na URL — elimina BOLA). Dados pessoais mascarados;
+        A OS vem do token (sem ID na URL — elimina BOLA). Dados pessoais mascarados;
         custos internos e usuários da oficina não são expostos.
       operationId: acompanharOrdemServico
-      x-use-case: AcompanharOrdemServicoUseCase
       security:
         - clienteBearerAuth: []
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
       responses:
-        '200':
-          description: Progresso da OS
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AcompanhamentoOSResponse' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { $ref: '#/components/responses/Acompanhamento' }
+        default: { $ref: '#/components/responses/Erro' }
 
-  /portal/ordem-servico/orcamento/aprovacao:
+  /portal/ordem-servico/orcamento/decisao:
     post:
       tags: [Portal do Cliente]
-      summary: Cliente aprova o orçamento (inicial ou adicional)
+      summary: Cliente aprova ou recusa o orçamento
       description: |
-        `AGUARDANDO_APROVACAO` → `EM_EXECUCAO`. Baixa as peças reservadas e registra o início da execução.
-        Exige a `versao` do orçamento exibido ao cliente — se a oficina alterou o orçamento nesse meio-tempo,
-        retorna `409 ORCAMENTO_DESATUALIZADO` (o cliente nunca aprova um valor que não viu).
-        O aceite é registrado com data/hora, IP e user-agent (evidência).
-      operationId: aprovarOrcamento
-      x-use-case: AprovarOrcamentoUseCase
+        - `APROVAR`: `AGUARDANDO_APROVACAO` → `EM_EXECUCAO`; baixa as peças reservadas e marca o início da execução.
+        - `RECUSAR`: orçamento **inicial** → OS `FINALIZADA` sem execução e reservas liberadas;
+          orçamento **adicional** → itens adicionais descartados e OS volta a `EM_EXECUCAO`.
+
+        Exige a `versaoOrcamento` exibida ao cliente: se a oficina mudou o orçamento nesse meio-tempo,
+        retorna `409 ORCAMENTO_DESATUALIZADO`. A decisão é registrada com data/hora, IP e user-agent (evidência).
+      operationId: decidirOrcamento
       security:
         - clienteBearerAuth: []
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/DecisaoOrcamentoRequest' }
+        content: { application/json: { schema: { $ref: '#/components/schemas/DecisaoOrcamentoRequest' } } }
       responses:
-        '200':
-          description: Orçamento aprovado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AcompanhamentoOSResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '200': { $ref: '#/components/responses/Acompanhamento' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
-
-  /portal/ordem-servico/orcamento/recusa:
-    post:
-      tags: [Portal do Cliente]
-      summary: Cliente recusa o orçamento
-      description: |
-        Orçamento **inicial** recusado → OS `FINALIZADA` sem execução e reservas liberadas.
-        Orçamento **adicional** recusado → itens adicionais descartados e OS volta a `EM_EXECUCAO`.
-      operationId: recusarOrcamento
-      x-use-case: RecusarOrcamentoUseCase
-      security:
-        - clienteBearerAuth: []
-      parameters:
-        - $ref: '#/components/parameters/XRequestId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/DecisaoOrcamentoRequest' }
-      responses:
-        '200':
-          description: Orçamento recusado
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AcompanhamentoOSResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        default: { $ref: '#/components/responses/Erro' }
 
   # ═════════════════════════ MÉTRICAS ═════════════════════════
   /metricas/tempo-medio-execucao:
@@ -1520,37 +784,17 @@ paths:
       tags: [Métricas]
       summary: Tempo médio de execução dos serviços
       description: |
-        Calculado sobre OS `FINALIZADA`/`ENTREGUE` no período (máx. 366 dias):
-        execução (`EM_EXECUCAO` → `FINALIZADA`), aprovação (`AGUARDANDO_APROVACAO` → `EM_EXECUCAO`)
-        e ciclo total (`RECEBIDA` → `ENTREGUE`), com detalhamento por serviço.
-      operationId: obterTempoMedioExecucao
-      x-use-case: CalcularTempoMedioExecucaoUseCase
+        Sobre OS `FINALIZADA`/`ENTREGUE` no período (máx. 366 dias): execução (`EM_EXECUCAO` → `FINALIZADA`),
+        aprovação (`AGUARDANDO_APROVACAO` → `EM_EXECUCAO`) e ciclo total (`RECEBIDA` → `ENTREGUE`), por serviço.
+      operationId: calcularTempoMedioExecucao
       x-roles: [ADMIN]
       parameters:
-        - $ref: '#/components/parameters/XRequestId'
-        - name: dataInicio
-          in: query
-          required: true
-          schema: { type: string, format: date }
-        - name: dataFim
-          in: query
-          required: true
-          schema: { type: string, format: date }
-        - name: servicoId
-          in: query
-          schema: { type: string, format: uuid }
+        - { name: dataInicio, in: query, required: true, schema: { type: string, format: date } }
+        - { name: dataFim, in: query, required: true, schema: { type: string, format: date } }
+        - { name: servicoId, in: query, schema: { type: string, format: uuid } }
       responses:
-        '200':
-          description: Métricas
-          headers:
-            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MetricaTempoExecucaoResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalError' }
+        '200': { description: Métricas, content: { application/json: { schema: { $ref: '#/components/schemas/MetricaTempoExecucaoResponse' } } } }
+        default: { $ref: '#/components/responses/Erro' }
 
 # ═══════════════════════════════════════════════════════════════════════
 components:
@@ -1574,39 +818,7 @@ components:
         `aud=oficina-portal`, `scope=portal:os`, `sub` = id da OS, validade de 30 min.
         Não é aceito nas rotas administrativas (e vice-versa).
 
-  headers:
-    XRequestId:
-      description: Identificador de correlação da requisição (ecoado ou gerado)
-      schema: { type: string, format: uuid }
-    Location:
-      description: URI do recurso criado
-      schema: { type: string, format: uri-reference, maxLength: 255 }
-    ETag:
-      description: Versão do recurso (usar em `If-Match` para concorrência otimista)
-      schema: { type: string, maxLength: 64, example: 'W/"3"' }
-    CacheControlNoStore:
-      description: Respostas com dados sensíveis não podem ser armazenadas em cache
-      schema: { type: string, enum: [no-store] }
-    RetryAfter:
-      description: Segundos até poder tentar novamente
-      schema: { type: integer, minimum: 1 }
-    RateLimitLimit:
-      description: Máximo de requisições na janela
-      schema: { type: integer }
-    RateLimitRemaining:
-      description: Requisições restantes na janela
-      schema: { type: integer }
-    RateLimitReset:
-      description: Segundos até a janela reiniciar
-      schema: { type: integer }
-
   parameters:
-    XRequestId:
-      name: X-Request-Id
-      in: header
-      required: false
-      description: Id de correlação (UUID). Gerado pelo servidor se ausente.
-      schema: { type: string, format: uuid }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1661,18 +873,55 @@ components:
       schema: { type: string, format: uuid }
 
   responses:
-    OrdemServicoAtualizada:
-      description: Comando executado; OS com novo status
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        ETag: { $ref: '#/components/headers/ETag' }
+    Token:
+      description: Par de tokens
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TokenResponse' }
+    OrdemServico:
+      description: OS no estado atual (após o comando, quando houver)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/OrdemServicoResponse' }
-    BadRequest:
-      description: Requisição malformada ou campos inválidos
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    Acompanhamento:
+      description: Visão da OS para o cliente
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AcompanhamentoOSResponse' }
+    NotFound:
+      description: Recurso não encontrado (também quando existe mas o chamador não pode vê-lo)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Conflito com o estado atual (duplicidade, transição inválida, orçamento desatualizado)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://api.oficina.example.com/problems/os-transicao-invalida
+            title: Transição de status inválida
+            status: 409
+            codigo: OS_TRANSICAO_INVALIDA
+            detail: Não é possível finalizar uma OS em AGUARDANDO_APROVACAO
+            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
+    UnprocessableEntity:
+      description: Regra de negócio violada
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://api.oficina.example.com/problems/estoque-insuficiente
+            title: Estoque insuficiente
+            status: 422
+            codigo: ESTOQUE_INSUFICIENTE
+            detail: 'Disponível: 2; solicitado: 4'
+            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
+    Erro:
+      description: |
+        Erros genéricos (RFC 9457): `400` validação, `401` não autenticado, `403` perfil/escopo sem permissão,
+        `412`/`428` `If-Match` desatualizado/ausente, `415` Content-Type inválido, `429` limite de requisições,
+        `500` erro interno (nunca expõe stack trace, SQL ou infraestrutura — só o `traceId`).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -1686,114 +935,6 @@ components:
             erros:
               - { campo: documento, mensagem: CPF/CNPJ inválido }
               - { campo: placa, mensagem: 'Placa deve seguir o padrão ABC1234 ou ABC1D23' }
-    Unauthorized:
-      description: Não autenticado — token ausente, inválido, expirado ou revogado / credenciais inválidas
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        WWW-Authenticate:
-          schema: { type: string, example: 'Bearer error="invalid_token"' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: https://api.oficina.example.com/problems/nao-autenticado
-            title: Não autenticado
-            status: 401
-            codigo: NAO_AUTENTICADO
-            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
-    Forbidden:
-      description: Autenticado, mas o perfil/escopo não permite esta operação
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: https://api.oficina.example.com/problems/acesso-negado
-            title: Acesso negado
-            status: 403
-            codigo: ACESSO_NEGADO
-            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
-    NotFound:
-      description: Recurso não encontrado (também usado quando o recurso existe mas o chamador não pode vê-lo)
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-    Conflict:
-      description: Conflito com o estado atual (duplicidade, transição inválida, orçamento desatualizado)
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: https://api.oficina.example.com/problems/os-transicao-invalida
-            title: Transição de status inválida
-            status: 409
-            codigo: OS_TRANSICAO_INVALIDA
-            detail: Não é possível finalizar uma OS em AGUARDANDO_APROVACAO
-            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
-    PreconditionFailed:
-      description: '`If-Match` não corresponde à versão atual (recurso alterado por outro usuário)'
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-    PreconditionRequired:
-      description: Cabeçalho `If-Match` obrigatório não informado
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-    UnsupportedMediaType:
-      description: Content-Type diferente de `application/json`
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-    UnprocessableEntity:
-      description: Regra de negócio violada
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: https://api.oficina.example.com/problems/estoque-insuficiente
-            title: Estoque insuficiente
-            status: 422
-            codigo: ESTOQUE_INSUFICIENTE
-            detail: 'Disponível: 2; solicitado: 4'
-            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
-    TooManyRequests:
-      description: Limite de requisições excedido
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-        Retry-After: { $ref: '#/components/headers/RetryAfter' }
-        RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
-        RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
-        RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-    InternalError:
-      description: Erro inesperado. Nunca expõe stack trace, SQL ou detalhes de infraestrutura — apenas o `traceId`.
-      headers:
-        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
-      content:
-        application/problem+json:
-          schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: about:blank
-            title: Erro interno
-            status: 500
-            codigo: ERRO_INTERNO
-            traceId: 1b4e28ba-2fa1-11d2-883f-0016d3cca427
 
   schemas:
     # ─────────────── Value Objects (Domain) ───────────────
@@ -1853,9 +994,6 @@ components:
     StatusOrcamento:
       type: string
       enum: [RASCUNHO, ENVIADO, APROVADO, RECUSADO]
-    Perfil:
-      type: string
-      enum: [ADMIN, ATENDENTE, MECANICO]
     TipoDocumento:
       type: string
       enum: [CPF, CNPJ]
@@ -1927,16 +1065,6 @@ components:
         expiresIn: { type: integer, example: 900 }
         refreshToken: { type: string, maxLength: 512 }
         refreshExpiresIn: { type: integer, example: 604800 }
-    UsuarioResponse:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        nome: { type: string, maxLength: 150 }
-        email: { $ref: '#/components/schemas/Email' }
-        perfis:
-          type: array
-          maxItems: 3
-          items: { $ref: '#/components/schemas/Perfil' }
 
     # ─────────────── Clientes ───────────────
     ClienteRequest:
@@ -2086,6 +1214,7 @@ components:
         unidade: { $ref: '#/components/schemas/UnidadeMedida' }
         fabricante: { type: string }
         precoCusto:
+          type: string
           allOf: [{ $ref: '#/components/schemas/Dinheiro' }]
           nullable: true
           description: Omitido (null) para perfis diferentes de ADMIN.
@@ -2121,21 +1250,19 @@ components:
         realizadoEm: { type: string, format: date-time }
 
     # ─────────────── Ordem de Serviço (agregado) ───────────────
-    ItemServicoRequest:
+    TipoItemOS:
+      type: string
+      enum: [SERVICO, PECA]
+    ItemOrdemRequest:
       type: object
       additionalProperties: false
-      required: [servicoId]
+      required: [tipo, referenciaId, quantidade]
+      description: Serviço do catálogo ou peça/insumo do estoque. Para `SERVICO` a quantidade deve ser inteira (1–50).
       properties:
-        servicoId: { type: string, format: uuid }
-        quantidade: { type: integer, minimum: 1, maximum: 50, default: 1 }
-        observacao: { type: string, maxLength: 255 }
-    ItemPecaRequest:
-      type: object
-      additionalProperties: false
-      required: [pecaId, quantidade]
-      properties:
-        pecaId: { type: string, format: uuid }
+        tipo: { $ref: '#/components/schemas/TipoItemOS' }
+        referenciaId: { type: string, format: uuid, description: '`servicoId` ou `pecaId`, conforme o `tipo`' }
         quantidade: { $ref: '#/components/schemas/Quantidade' }
+        observacao: { type: string, maxLength: 255 }
     NovoClienteRequest:
       type: object
       additionalProperties: false
@@ -2147,48 +1274,35 @@ components:
     AbrirOrdemServicoRequest:
       type: object
       additionalProperties: false
-      required: [documentoCliente, servicos]
-      description: Informe exatamente um entre `veiculoId` e `novoVeiculo`.
+      required: [documentoCliente, itens]
+      description: Informe exatamente um entre `veiculoId` e `novoVeiculo`. `itens` deve conter ao menos um serviço.
       properties:
         documentoCliente: { $ref: '#/components/schemas/Documento' }
         novoCliente: { $ref: '#/components/schemas/NovoClienteRequest' }
         veiculoId: { type: string, format: uuid }
         novoVeiculo: { $ref: '#/components/schemas/NovoVeiculoRequest' }
-        servicos:
+        itens:
           type: array
           minItems: 1
-          maxItems: 30
-          items: { $ref: '#/components/schemas/ItemServicoRequest' }
-        pecas:
-          type: array
-          maxItems: 50
-          items: { $ref: '#/components/schemas/ItemPecaRequest' }
+          maxItems: 80
+          items: { $ref: '#/components/schemas/ItemOrdemRequest' }
         relatoCliente: { $ref: '#/components/schemas/TextoLivre' }
     ObservacaoRequest:
       type: object
       additionalProperties: false
       properties:
         observacao: { $ref: '#/components/schemas/TextoLivre' }
-    ItemServicoOSResponse:
+    ItemOSResponse:
       type: object
       properties:
         id: { type: string, format: uuid }
-        servicoId: { type: string, format: uuid }
-        nome: { type: string }
-        quantidade: { type: integer }
-        precoUnitario: { $ref: '#/components/schemas/Dinheiro' }
-        subtotal: { $ref: '#/components/schemas/Dinheiro' }
-        adicional: { type: boolean, description: Incluído após a aprovação inicial }
-    ItemPecaOSResponse:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        pecaId: { type: string, format: uuid }
+        tipo: { $ref: '#/components/schemas/TipoItemOS' }
+        referenciaId: { type: string, format: uuid }
         nome: { type: string }
         quantidade: { type: number }
         precoUnitario: { $ref: '#/components/schemas/Dinheiro' }
         subtotal: { $ref: '#/components/schemas/Dinheiro' }
-        adicional: { type: boolean }
+        adicional: { type: boolean, description: Incluído após a aprovação inicial }
     OrcamentoResponse:
       type: object
       properties:
@@ -2205,6 +1319,7 @@ components:
       type: object
       properties:
         statusAnterior:
+          type: string
           allOf: [{ $ref: '#/components/schemas/StatusOS' }]
           nullable: true
         statusNovo: { $ref: '#/components/schemas/StatusOS' }
@@ -2220,13 +1335,16 @@ components:
         status: { $ref: '#/components/schemas/StatusOS' }
         cliente: { $ref: '#/components/schemas/ClienteResumoResponse' }
         veiculo: { $ref: '#/components/schemas/VeiculoResumoResponse' }
-        servicos:
+        itens:
           type: array
-          items: { $ref: '#/components/schemas/ItemServicoOSResponse' }
-        pecas:
-          type: array
-          items: { $ref: '#/components/schemas/ItemPecaOSResponse' }
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ItemOSResponse' }
         orcamento: { $ref: '#/components/schemas/OrcamentoResponse' }
+        historico:
+          type: array
+          maxItems: 100
+          description: Linha do tempo de status (auditoria).
+          items: { $ref: '#/components/schemas/HistoricoStatusResponse' }
         relatoCliente: { type: string }
         abertaEm: { type: string, format: date-time }
         inicioExecucaoEm: { type: string, format: date-time, nullable: true }
@@ -2284,8 +1402,9 @@ components:
     DecisaoOrcamentoRequest:
       type: object
       additionalProperties: false
-      required: [versaoOrcamento]
+      required: [decisao, versaoOrcamento]
       properties:
+        decisao: { type: string, enum: [APROVAR, RECUSAR] }
         versaoOrcamento:
           type: integer
           minimum: 1
