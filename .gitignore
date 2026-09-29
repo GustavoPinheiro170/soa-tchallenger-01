@@ -1,0 +1,9 @@
+target/
+out/
+.idea/workspace.xml
+.idea/shelf/
+.env
+data/
+.claude/
+.agents/
+skills-lock.json
